@@ -1,0 +1,31 @@
+name: keep-alive ping
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 min (GitHub may delay a few min under load)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping analytics API
+        run: |
+          curl -sS -m 60 -o /dev/null -w "analytics /health -> %{http_code}\n" \
+            "https://kish-analytics-api.onrender.com/health" || true
+
+      # Weekly heartbeat commit (Sundays 00:00-00:04 window) so GitHub never
+      # disables this scheduled workflow for repo inactivity (60-day rule).
+      - name: Weekly heartbeat
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date -u +%u%H%M)" \< "70005" ] && [ "$(date -u +%u)" = "7" ] && [ "$(date -u +%H%M)" \< "0005" ]; then
+            git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" hb
+            cd hb
+            date -u > heartbeat.txt
+            git config user.name "heartbeat"
+            git config user.email "actions@github.com"
+            git add heartbeat.txt && git commit -m "heartbeat" && git push
+          fi
