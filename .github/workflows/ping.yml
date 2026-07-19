@@ -1,7 +1,12 @@
 name: keep-alive ping
+# GitHub silently throttles/delays high-frequency `schedule` cron (*/5) on
+# low-activity repos — observed gaps of 50-75 min in practice, more than
+# enough for Render's free tier to spin down (15 min idle). Fix: trigger
+# reliably at a LOW frequency GitHub won't drop, then loop with real sleeps
+# inside that one job for continuous 5-min coverage until the next trigger.
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 min (GitHub may delay a few min under load)
+    - cron: "0 */3 * * *"   # every 3h (low-frequency schedules aren't throttled)
   workflow_dispatch:
 
 permissions:
@@ -10,18 +15,23 @@ permissions:
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 200
     steps:
-      - name: Ping analytics API
+      - name: Ping every 5 min for ~3h10m (covers past the next scheduled trigger)
         run: |
-          curl -sS -m 60 -o /dev/null -w "analytics /health -> %{http_code}\n" \
-            "https://kish-analytics-api.onrender.com/health" || true
+          end=$((SECONDS + 190*60))
+          while [ $SECONDS -lt $end ]; do
+            curl -sS -m 60 -o /dev/null -w "$(date -u +%H:%M:%S) analytics /health -> %{http_code}\n" \
+              "https://kish-analytics-api.onrender.com/health" || true
+            sleep 300
+          done
 
       # Weekly heartbeat commit (Sundays 00:00-00:04 window) so GitHub never
       # disables this scheduled workflow for repo inactivity (60-day rule).
       - name: Weekly heartbeat
         if: github.event_name == 'schedule'
         run: |
-          if [ "$(date -u +%u%H%M)" \< "70005" ] && [ "$(date -u +%u)" = "7" ] && [ "$(date -u +%H%M)" \< "0005" ]; then
+          if [ "$(date -u +%u)" = "7" ] && [ "$(date -u +%H%M)" \< "0005" ]; then
             git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" hb
             cd hb
             date -u > heartbeat.txt
