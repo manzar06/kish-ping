@@ -1,45 +1,51 @@
 name: keep-alive ping
-# GitHub silently throttles/delays `schedule` cron on low-activity repos —
-# EVEN at a "low" 3-hour cadence, observed real gaps of 36-45 min between
-# consecutive runs (only a ~10 min safety buffer between the 190-min loop
-# and the nominal 180-min/3h schedule — not enough headroom for GitHub's
-# actual scheduling jitter). This left Render's free tier idle past its
-# 15-min spin-down threshold, causing real cold-start failures for users.
-# Fix: much wider safety margin — hourly trigger (a far more standard,
-# reliably-honored cadence) + a 100-min loop, giving ~40 min of overlap
-# buffer per cycle even if a trigger is delayed.
+# GitHub cron on this repo is heavily throttled: observed gaps of 34min-2h21m
+# between runs, regardless of nominal cadence. Any gap > Render's 15-min
+# spin-down = cold start ("site stuck"). Strategy: hourly trigger, but each
+# run pings for up to ~5h50m, and `concurrency: cancel-in-progress` lets the
+# next trigger that ACTUALLY fires supersede the running loop. Coverage is
+# continuous unless GitHub delays cron by more than ~5h50m.
+# (Cancelled runs in the Actions list are expected/normal with this design.)
 on:
   schedule:
-    - cron: "0 * * * *"   # hourly — reliable cadence, not silently throttled
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 115
+    timeout-minutes: 355
     steps:
-      - name: Ping every 5 min for ~100min (covers well past the next hourly trigger)
+      # Heartbeat FIRST (the loop below usually gets superseded, so anything
+      # after it would never run). Commits only when the last commit is older
+      # than 5 days -> keeps the repo active vs GitHub's 60-day cron disable,
+      # without weekday timing assumptions.
+      - name: Heartbeat commit (only if repo quiet > 5 days)
         run: |
-          end=$((SECONDS + 100*60))
+          git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" hb
+          cd hb
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt 432000 ]; then
+            date -u > heartbeat.txt
+            git config user.name "heartbeat"
+            git config user.email "actions@github.com"
+            git add heartbeat.txt && git commit -m "heartbeat" && git push
+          else
+            echo "repo active recently; no heartbeat needed"
+          fi
+
+      - name: Ping /health every 5 min (up to ~5h50m; superseded by next trigger)
+        run: |
+          end=$((SECONDS + 350*60))
           while [ $SECONDS -lt $end ]; do
             curl -sS -m 60 -o /dev/null -w "$(date -u +%H:%M:%S) analytics /health -> %{http_code}\n" \
               "https://kish-analytics-api.onrender.com/health" || true
             sleep 300
           done
-
-      # Weekly heartbeat commit (Sundays 00:00-00:04 window) so GitHub never
-      # disables this scheduled workflow for repo inactivity (60-day rule).
-      - name: Weekly heartbeat
-        if: github.event_name == 'schedule'
-        run: |
-          if [ "$(date -u +%u)" = "7" ] && [ "$(date -u +%H%M)" \< "0005" ]; then
-            git clone --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" hb
-            cd hb
-            date -u > heartbeat.txt
-            git config user.name "heartbeat"
-            git config user.email "actions@github.com"
-            git add heartbeat.txt && git commit -m "heartbeat" && git push
-          fi
